@@ -1,5 +1,55 @@
 // ===== POS SYSTEM JAVASCRIPT =====
 
+// ===== SESSION MANAGEMENT =====
+function checkSession() {
+    const session = localStorage.getItem('pos_session');
+    if (!session) {
+        // Redirect to login if no session
+        window.location.href = 'login.html';
+        return;
+    }
+    
+    const sessionData = JSON.parse(session);
+    const now = new Date().getTime();
+    
+    // Check if session is still valid (24 hours)
+    if (now - sessionData.timestamp > 24 * 60 * 60 * 1000) {
+        // Clear expired session and redirect to login
+        localStorage.removeItem('pos_session');
+        window.location.href = 'login.html';
+        return;
+    }
+    
+    // Update user info in the UI
+    updateUserInfo(sessionData.user);
+}
+
+function updateUserInfo(user) {
+    const userDetails = document.querySelector('.user-details h4');
+    if (userDetails) {
+        userDetails.textContent = user.name;
+    }
+    
+    // Update role in sidebar
+    const roleSpan = document.querySelector('.user-details span');
+    if (roleSpan) {
+        roleSpan.textContent = user.role.charAt(0).toUpperCase() + user.role.slice(1);
+    }
+}
+
+function logout() {
+    // Clear session
+    localStorage.removeItem('pos_session');
+    
+    // Show logout notification
+    showNotification('Logged out successfully', 'info');
+    
+    // Redirect to login page
+    setTimeout(() => {
+        window.location.href = 'login.html';
+    }, 1000);
+}
+
 // ===== PRODUCT DATA =====
 const PRODUCTS = [
     // Men's Shoes
@@ -467,13 +517,15 @@ function renderProducts() {
             <div class="product-image">
                 <img src="${product.image}" alt="${product.name}" loading="lazy">
                 <div class="product-badge">${product.category.toUpperCase()}</div>
+                ${product.stock === 0 ? '<div class="out-of-stock-overlay">Out of Stock</div>' : ''}
+                ${product.stock > 0 && product.stock <= 5 ? '<div class="low-stock-overlay">Low Stock</div>' : ''}
             </div>
             <div class="product-info">
                 <h3 class="product-name">${product.name}</h3>
                 <p class="product-brand">${product.brand}</p>
                 <div class="product-details">
                     <span class="product-price">${formatPrice(product.price)}</span>
-                    <span class="product-stock">${product.stock} in stock</span>
+                    <span class="product-stock ${product.stock === 0 ? 'out-of-stock' : product.stock <= 5 ? 'low-stock' : ''}">${product.stock} in stock</span>
                 </div>
                 <div class="product-sizes">
                     <span class="size-label">Sizes:</span>
@@ -536,6 +588,8 @@ function addToCart(productId) {
         if (existingItem.quantity < product.stock) {
             existingItem.quantity++;
             existingItem.subtotal = existingItem.quantity * existingItem.price;
+            // Deduct stock when quantity increases
+            product.stock--;
         } else {
             showNotification('Maximum stock reached for this item', 'warning');
             return;
@@ -550,17 +604,30 @@ function addToCart(productId) {
             subtotal: product.price,
             size: product.sizes[0] // Default to first available size
         });
+        // Deduct stock when adding new item
+        product.stock--;
     }
     
     renderCart();
     updateCartSummary();
+    renderProducts(); // Re-render products to show updated stock
     showNotification(`${product.name} added to cart`, 'success');
 }
 
 function removeFromCart(productId) {
+    const itemToRemove = currentState.cart.find(item => item.id === productId);
+    if (itemToRemove) {
+        // Restore stock when item is removed
+        const product = PRODUCTS.find(p => p.id === productId);
+        if (product) {
+            product.stock += itemToRemove.quantity;
+        }
+    }
+    
     currentState.cart = currentState.cart.filter(item => item.id !== productId);
     renderCart();
     updateCartSummary();
+    renderProducts(); // Re-render products to show updated stock
 }
 
 function updateQuantity(productId, newQuantity) {
@@ -574,9 +641,22 @@ function updateQuantity(productId, newQuantity) {
         return;
     }
     
-    if (newQuantity > product.stock) {
+    const oldQuantity = item.quantity;
+    const quantityDifference = newQuantity - oldQuantity;
+    
+    // Check if we can add more items (for quantity increase)
+    if (quantityDifference > 0 && quantityDifference > product.stock) {
         showNotification('Cannot exceed available stock', 'warning');
         return;
+    }
+    
+    // Update stock based on quantity change
+    if (quantityDifference > 0) {
+        // Increasing quantity - deduct stock
+        product.stock -= quantityDifference;
+    } else if (quantityDifference < 0) {
+        // Decreasing quantity - restore stock
+        product.stock += Math.abs(quantityDifference);
     }
     
     item.quantity = newQuantity;
@@ -584,6 +664,7 @@ function updateQuantity(productId, newQuantity) {
     
     renderCart();
     updateCartSummary();
+    renderProducts(); // Re-render products to show updated stock
 }
 
 function renderCart() {
@@ -636,13 +717,22 @@ function updateCartSummary() {
 }
 
 function clearCart() {
+    // Restore stock for all items in cart
+    currentState.cart.forEach(item => {
+        const product = PRODUCTS.find(p => p.id === item.id);
+        if (product) {
+            product.stock += item.quantity;
+        }
+    });
+    
     currentState.cart = [];
     currentState.paymentAmount = '';
     renderCart();
     updateCartSummary();
     document.getElementById('payment-amount').value = '';
     updateChangeDisplay();
-    showNotification('Cart cleared', 'info');
+    renderProducts(); // Re-render products to show updated stock
+    showNotification('Cart cleared', 'clear');
 }
 
 // ===== PAYMENT PROCESSING =====
@@ -713,13 +803,8 @@ function completeTransaction() {
         change: paymentAmount - total
     };
     
-    // Update stock
-    currentState.cart.forEach(item => {
-        const product = PRODUCTS.find(p => p.id === item.id);
-        if (product) {
-            product.stock -= item.quantity;
-        }
-    });
+    // Stock is already deducted when items are added to cart
+    // No need to deduct again during transaction completion
     
     // Clear cart and payment
     clearCart();
@@ -732,8 +817,22 @@ function completeTransaction() {
 }
 
 function cancelTransaction() {
-    clearCart();
-    showNotification('Transaction cancelled', 'info');
+    // Restore stock for all items in cart
+    currentState.cart.forEach(item => {
+        const product = PRODUCTS.find(p => p.id === item.id);
+        if (product) {
+            product.stock += item.quantity;
+        }
+    });
+    
+    currentState.cart = [];
+    currentState.paymentAmount = '';
+    renderCart();
+    updateCartSummary();
+    document.getElementById('payment-amount').value = '';
+    updateChangeDisplay();
+    renderProducts(); // Re-render products to show updated stock
+    showNotification('Transaction cancelled', 'cancel');
 }
 
 // ===== RECEIPT GENERATION =====
@@ -912,6 +1011,9 @@ function updateTime() {
 
 // ===== EVENT LISTENERS =====
 document.addEventListener('DOMContentLoaded', function() {
+    // Check session first
+    checkSession();
+    
     // Initialize the application
     updateCategoryCounts(); // Initialize category counts first
     renderProducts();
@@ -1060,3 +1162,4 @@ window.showReceipt = showReceipt;
 window.closeReceipt = closeReceipt;
 window.printReceipt = printReceipt;
 window.showNotification = showNotification;
+window.logout = logout;
